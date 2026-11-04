@@ -515,7 +515,7 @@ pub fn Namespace(comptime Tri: type) type {
             defer lanes_draft.depthLog(self, requests);
             // a shared round's chains: their heads in one pass a step (the drafts each would get alone)
             var batched: [round_streams]bool = @splat(false);
-            if (lanes_draft.batchHeads() and requests.len > 1 and requests.len <= batched.len) {
+            if (lanes_draft.batchHeads() and requests.len > 1 and requests.len <= batched.len and (self.verify_capacity.shared or requests.len <= mtp_ops.max_lanes)) {
                 var at: usize = 0;
                 while (at < requests.len) : (at += mtp_ops.max_lanes) {
                     const end = @min(requests.len, at + mtp_ops.max_lanes);

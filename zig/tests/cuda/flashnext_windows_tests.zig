@@ -6,12 +6,12 @@ const check = @import("check.zig");
 const prompt = flash.prompt;
 const mtp = flash.mtp;
 
-/// Window widths in one shared pass: none past 16 rows in all, past 16 (the router's few rows), 32, and 64.
-const shapes = [_][]const usize{ &.{ 1, 1, 1, 1 }, &.{ 5, 5, 5, 5 }, &.{ 1, 16, 3, 7 }, &.{ 16, 16 }, &.{ 16, 16, 16, 16 } };
+/// Shared windows through the legacy widths, ragged five-stream rows and a full 160-row round.
+const shapes = [_][]const usize{ &.{ 1, 1, 1, 1 }, &.{ 5, 5, 5, 5 }, &.{ 1, 16, 3, 7 }, &.{ 16, 16 }, &.{ 16, 16, 16, 16 }, &.{ 1, 7, 16, 32, 32 }, &.{ 32, 32, 32, 32, 32 } };
 
 const Side = struct {
-    seqs: [4]prompt.Seq = undefined,
-    drafts: [4]mtp.Draft = undefined,
+    seqs: [5]prompt.Seq = undefined,
+    drafts: [5]mtp.Draft = undefined,
     made: usize = 0,
 
     fn deinit(s: *Side, gpa: std.mem.Allocator) void {
@@ -39,7 +39,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, ids_path: []const u8) !void {
     defer e.deinit();
     const ops: mtp.Ops(flash.Tri) = .{ .e = e, .tri = tri, .h = undefined };
     const row_bytes = prompt.vocabulary * 2;
-    var shared = try cuda.DeviceBuffer.alloc(gpu.d, 64 * row_bytes);
+    var shared = try cuda.DeviceBuffer.alloc(gpu.d, 160 * row_bytes);
     defer shared.free();
     // a short prompt (dense attention) and one past 2,048 keys (the block indexer's sparse selection)
     for ([_]usize{ @min(base.items.len, 100), 2600 }) |length| {
@@ -58,7 +58,7 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
     defer alone.deinit(gpa);
     var together: Side = .{};
     defer together.deinit(gpa);
-    var windows: [4][16]u32 = undefined;
+    var windows: [5][32]u32 = undefined;
     var total: usize = 0;
     for (widths, 0..) |w, i| {
         // each stream its own prompt length (so its own positions) and its own forced window
@@ -82,26 +82,32 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
     const want_hidden = try gpa.alloc(u8, total * hidden);
     defer gpa.free(want_hidden);
     var row0: usize = 0;
+    var solo_ns: i96 = 0;
     for (widths, 0..) |w, i| {
+        const began = std.Io.Clock.awake.now(gpu.io).toNanoseconds();
         try ops.verify(&alone.seqs[i], &alone.drafts[i], windows[i][0..w]);
         try stream.synchronize();
+        solo_ns += std.Io.Clock.awake.now(gpu.io).toNanoseconds() - began;
         try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(want_logits[row0 * row_bytes ..].ptr, alone.drafts[i].logits.ptr, w * row_bytes), "cuMemcpyDtoH");
         try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(want_hidden[row0 * hidden ..].ptr, alone.drafts[i].streams.ptr, w * hidden), "cuMemcpyDtoH");
         row0 += w;
     }
     // the same windows in one shared pass
-    var seqs: [4]*prompt.Seq = undefined;
-    var ds: [4]*mtp.Draft = undefined;
-    var idss: [4][]const u32 = undefined;
+    var seqs: [5]*prompt.Seq = undefined;
+    var ds: [5]*mtp.Draft = undefined;
+    var idss: [5][]const u32 = undefined;
     for (widths, 0..) |w, i| {
         seqs[i] = &together.seqs[i];
         ds[i] = &together.drafts[i];
         idss[i] = windows[i][0..w];
     }
     const n = widths.len;
+    const shared_began = std.Io.Clock.awake.now(gpu.io).toNanoseconds();
     try ops.verifyMany(seqs[0..n], ds[0..n], idss[0..n], shared);
     try stream.synchronize();
-    const got = try gpa.alloc(u8, @max(row_bytes, hidden) * 16);
+    const shared_ns = std.Io.Clock.awake.now(gpu.io).toNanoseconds() - shared_began;
+    std.debug.print("verify timing: {d} streams {d} rows at {d} tokens, solo sum {d:.3} ms, shared {d:.3} ms\n", .{ n, total, ids.len, @as(f64, @floatFromInt(solo_ns)) / 1e6, @as(f64, @floatFromInt(shared_ns)) / 1e6 });
+    const got = try gpa.alloc(u8, @max(row_bytes, hidden) * 32);
     defer gpa.free(got);
     row0 = 0;
     for (widths, 0..) |w, i| {

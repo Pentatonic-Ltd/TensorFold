@@ -46,4 +46,6 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const plan_step = b.step("test-flashnext-mtp-plan-host", "The batched MTP head's requests fit the admitted capacity, without a device");
     plan_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = plan })).step);
     all.dependOn(plan_step);
+    const ragged = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_ragged.zig"), .target = b.graph.host, .link_libc = true });
+    b.step("test-flashnext-ragged-host", "Full-round verify capacity and legacy fallback without a device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ragged })).step);
 }
