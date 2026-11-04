@@ -7,6 +7,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "mtp_drafts")) opts.mtp_drafts = o.mtp_drafts;
     if (@hasField(F.Options, "mtp_confidence")) opts.mtp_confidence = o.mtp_confidence;
     if (@hasField(F.Options, "mtp_drafts") and o.mtp_drafts == 0) opts.drafts = false;
+    if (@hasField(F.Options, "verify_streams")) opts.verify_streams = o.lanes;
     if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
     if (@hasField(F.Options, "lanes_fixed")) opts.lanes_fixed = o.lanes_fixed;
     if (@hasField(F.Options, "rank")) {
@@ -67,15 +68,22 @@ test "native family options forward lane counts and fixedness only when declared
     const Fixed = struct {
         pub const Options = struct { lanes: u32 = 1, lanes_fixed: bool = false };
     };
+    const Verify = struct {
+        pub const Options = struct { verify_streams: u32 = 32 };
+    };
     var why: []const u8 = "";
     var counted: Counted.Options = .{};
     var fixed: Fixed.Options = .{};
+    var verify: Verify.Options = .{};
     const request: api.Open = .{ .dir = "", .model_type = "kolibri1", .lanes = 7, .lanes_fixed = true };
     try std.testing.expect(set(Counted, request, &counted, &why));
     try std.testing.expect(set(Fixed, request, &fixed, &why));
     try std.testing.expectEqual(@as(u32, 7), counted.lanes);
     try std.testing.expectEqual(@as(u32, 7), fixed.lanes);
     try std.testing.expect(fixed.lanes_fixed);
+    try std.testing.expect(set(Verify, request, &verify, &why));
+    try std.testing.expectEqual(@as(u32, 7), verify.verify_streams);
+    try std.testing.expect(!@hasField(Verify.Options, "lanes"));
 }
 
 test "prompt precision: family options receive both explicit int8 and default bf16" {

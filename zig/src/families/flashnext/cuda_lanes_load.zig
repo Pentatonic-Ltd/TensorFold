@@ -65,7 +65,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     }
     errdefer own.engine.deinit();
     const e = own.engine;
-    own.verify_capacity = @import("cuda_ragged.zig").capacity(@import("cuda_ragged.zig").wanted(), o.tp != 1, e.chunk, mtp.max_rows, mtp.round_rows);
+    own.verify_capacity = @import("cuda_ragged.zig").capacity(@import("cuda_ragged.zig").wanted(), o.tp != 1, e.chunk, mtp.max_rows, mtp.round_rows, o.verify_streams);
     if (own.verify_capacity.shared) std.log.info("flashnext: ragged verify reserves {d} rows, up to {d} streams in one target pass", .{ own.verify_capacity.rows, own.verify_capacity.streams });
     if (e.chunk != e.busy_chunk) std.log.info("flashnext: prompt passes of {d} rows, {d} while another stream decodes", .{ e.chunk, e.busy_chunk });
     if (o.vision) |limits| {

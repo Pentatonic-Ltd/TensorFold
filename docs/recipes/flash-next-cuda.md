@@ -284,9 +284,10 @@ round, including copied continuations. Unset or `0` preserves the existing 64-ro
 acceptance and position-keyed sampling remain independent for each stream. MTP chains use `draftMany`, one shared
 head pass per depth, with independent depth and confidence stops.
 
-The score reservation grows to `min(prompt chunk, 1024)` rows. The round admits at most that many rows divided by
-32 streams (the widest window), so every admitted window fits one pass. With the default chunk this is 32 streams;
-a 160-row chunk admits five. This reservation is included in startup memory admission. The flag takes precedence
+The score reservation is `min(prompt chunk, min(parallel, 32) * 32)` rows, bounded by the configured stream count
+so unused windows do not crowd out prompt-cache states. The round admits at most that many rows divided by 32
+(the widest window), so every admitted window fits one pass. With five configured streams it reserves 160 rows;
+a 160-row chunk admits at most five. This reservation is included in startup memory admission. The flag takes precedence
 over `TF_FLASHNEXT_WINDOW_ROWS`; two ranks and chunks below 64 rows retain the existing path. Plain streams still
 share their own rounds. `TF_FLASHNEXT_BATCH_HEADS=0` retains serial MTP drafting. `TF_FLASHNEXT_ATTN_LANES=1` can
 combine supported attention launches; wider passes retain the existing per-lane attention fallback.
