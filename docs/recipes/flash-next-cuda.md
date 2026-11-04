@@ -281,8 +281,8 @@ per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test fla
 `TF_FLASHNEXT_RAGGED_VERIFY=1` reserves one target pass for every drafting stream's complete window in a shared
 round, including copied continuations. Unset or `0` preserves the existing 64-row grouping. This opt-in uses
 `verifyMany` and the existing per-stream KV/position tables, DeltaNet rollback logs, hidden rows and score buffers;
-acceptance and position-keyed sampling remain independent for each stream. MTP chains use `draftMany`, one shared
-head pass per depth, with independent depth and confidence stops.
+acceptance and position-keyed sampling remain independent for each stream. MTP chains use `draftMany` in groups of up to 16 streams,
+with a shared head pass per depth and independent depth and confidence stops.
 
 The score reservation is `min(prompt chunk, min(parallel, 32) * 32)` rows, bounded by the configured stream count
 so unused windows do not crowd out prompt-cache states. The round admits at most that many rows divided by 32
