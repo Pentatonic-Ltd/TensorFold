@@ -7,6 +7,7 @@ const weights = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
+const ragged = @import("cuda_ragged.zig");
 const snap = @import("cuda_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
 const Glue = @import("cuda_glue.zig").Glue;
@@ -152,6 +153,7 @@ pub fn Namespace(comptime Tri: type) type {
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
             depth: usize = mtp.default_depth,
+            verify_capacity: ragged.Capacity = .{ .rows = mtp.round_rows, .streams = round_streams },
             confidence: f64 = mtp.default_confidence,
             /// A captured Triton set (TENSORFOLD_CUDA_KERNELS) for comparison, else null: our own glue.
             set: ?cuda.aot.Set = null,
@@ -230,8 +232,8 @@ pub fn Namespace(comptime Tri: type) type {
                     .draft_probabilities = drafting,
                     .streams_exact = true,
                     .hidden_rows = true,
-                    .batch_rows = if (drafting) mtp.round_rows else round_streams,
-                    .max_streams = round_streams,
+                    .batch_rows = if (drafting) @intCast(self.verify_capacity.rows) else round_streams,
+                    .max_streams = if (drafting) self.verify_capacity.streams else round_streams,
                     // a shared round's streams draft in one head pass a step (lanes_draft.batched)
                     .draft_streams = drafting and lanes_draft.batchHeads(),
                 };
@@ -485,7 +487,7 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 if (w.tokens.len > 0) @memcpy(o.drafts[0..w.tokens.len], w.tokens);
             }
-            const cap = @min(@min(envUsize("TF_FLASHNEXT_WINDOW_ROWS", mtp.round_rows), mtp.round_rows), self.engine.chunk);
+            const cap = if (self.verify_capacity.shared) self.verify_capacity.rows else @min(@min(envUsize("TF_FLASHNEXT_WINDOW_ROWS", mtp.round_rows), mtp.round_rows), self.engine.chunk);
             try @import("cuda_lanes_verify.zig").windows(self, windows, out, drafted[0..held], row_ids, cap);
             var at: usize = 0;
             while (at < plain) : (at += round_streams) {
@@ -512,8 +514,14 @@ pub fn Namespace(comptime Tri: type) type {
             if (self.head == null) return error.NoDraftHead;
             defer lanes_draft.depthLog(self, requests);
             // a shared round's chains: their heads in one pass a step (the drafts each would get alone)
-            var batched: [mtp_ops.max_lanes]bool = @splat(false);
-            if (lanes_draft.batchHeads() and requests.len > 1 and requests.len <= mtp_ops.max_lanes) try lanes_draft.batched(self, requests, &batched);
+            var batched: [round_streams]bool = @splat(false);
+            if (lanes_draft.batchHeads() and requests.len > 1 and requests.len <= batched.len) {
+                var at: usize = 0;
+                while (at < requests.len) : (at += mtp_ops.max_lanes) {
+                    const end = @min(requests.len, at + mtp_ops.max_lanes);
+                    try lanes_draft.batched(self, requests[at..end], batched[at..end]);
+                }
+            }
             for (requests, 0..) |r, ri| {
                 if (ri < batched.len and batched[ri]) continue;
                 if (r.lanes != null) return error.TreesNotBuilt;

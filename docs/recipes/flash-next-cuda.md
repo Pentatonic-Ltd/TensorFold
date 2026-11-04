@@ -275,3 +275,22 @@ per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test fla
 - Draws are made on the host from each row's scores.
 - Our glue's sums are not the captured kernels' bit for bit, so replies part from the Python engine's teacher path
   after a while, as that engine's own served path does (10 to 36 tokens, from its routed-experts kernel's rounding).
+
+### Experimental full-round ragged verification
+
+`TF_FLASHNEXT_RAGGED_VERIFY=1` reserves one target pass for every drafting stream's complete window in a shared
+round, including copied continuations. Unset or `0` preserves the existing 64-row grouping. This opt-in uses
+`verifyMany` and the existing per-stream KV/position tables, DeltaNet rollback logs, hidden rows and score buffers;
+acceptance and position-keyed sampling remain independent for each stream. MTP chains use `draftMany`, one shared
+head pass per depth, with independent depth and confidence stops.
+
+The score reservation grows to `min(prompt chunk, 1024)` rows. The round admits at most that many rows divided by
+32 streams (the widest window), so every admitted window fits one pass. With the default chunk this is 32 streams;
+a 160-row chunk admits five. This reservation is included in startup memory admission. The flag takes precedence
+over `TF_FLASHNEXT_WINDOW_ROWS`; two ranks and chunks below 64 rows retain the existing path. Plain streams still
+share their own rounds. `TF_FLASHNEXT_BATCH_HEADS=0` retains serial MTP drafting. `TF_FLASHNEXT_ATTN_LANES=1` can
+combine supported attention launches; wider passes retain the existing per-lane attention fallback.
+
+This path is default off pending full-model drafted/plain and concurrent/solo token parity and throughput gates.
+The historical measurements above describe their original revisions; v1.2.2 already has shared verification up
+to 64 rows and batched MTP heads, so their “one pass each” description is not the v1.2.2 implementation.

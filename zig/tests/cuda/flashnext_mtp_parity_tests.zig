@@ -71,6 +71,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, ids_path: []const u8) !void {
     const ids = try gpu.gpa.alloc(u32, @min(base.items.len, 64));
     defer gpu.gpa.free(ids);
     for (ids, 0..) |*t, i| t.* = base.items[i % base.items.len];
+    try verifyRagged(gpu, e, ops, &stream, ids);
     // no confidence stop (the whole chain), then a stop above every probability (each chain keeps one token)
     for ([_]f64{ 0, 2 }) |confidence| {
         for (shapes) |widths| try shape(gpu, e, ops, &stream, ids, widths, confidence, .greedy);
@@ -152,4 +153,59 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         try check.expect(!(try sameLogits(gpu, &alone.drafts[1], &together.drafts[1])), "the planted broken gather is caught", .{});
     }
     check.pass("a shared MTP head over {d} {s} streams ({any} rows) equals each stream's own pass: logits, proposals, probabilities and the stop", .{ n, @tagName(mode), widths });
+}
+
+/// Target windows wider than the legacy 64-row round, with independent rejection points.
+fn verifyRagged(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cuda.Stream, ids: []const u32) !void {
+    const widths = [_]usize{ 1, 7, 16, 32, 32 };
+    const kept = [_]usize{ 1, 3, 16, 7, 2 };
+    const n = widths.len;
+    var alone: Side = .{};
+    defer alone.deinit(gpu.gpa);
+    var together: Side = .{};
+    defer together.deinit(gpu.gpa);
+    var qs: [n]*prompt.Seq = undefined;
+    var ds: [n]*mtp.Draft = undefined;
+    var tokens: [n][mtp.max_rows]u32 = undefined;
+    var windows: [n][]const u32 = undefined;
+    const scores = try cuda.DeviceBuffer.alloc(e.driver, 160 * prompt.vocabulary * 2);
+    defer scores.free();
+    for (0..n) |i| {
+        inline for (.{ &alone, &together }) |side| {
+            side.seqs[i] = try e.newSeq(ids.len + 128);
+            side.drafts[i] = mtp.Draft.init(gpu.gpa, e.driver, stream.*, ids.len + 128, ops.h.ids.len, e.chunk) catch |err| {
+                side.seqs[i].deinit(gpu.gpa);
+                return err;
+            };
+            side.made += 1;
+            try ops.prefill(&side.seqs[i], &side.drafts[i], ids[0 .. ids.len - i * 3]);
+        }
+        qs[i] = &together.seqs[i];
+        ds[i] = &together.drafts[i];
+        for (&tokens[i], 0..) |*t, r| t.* = @intCast(37 + 101 * i + 17 * r);
+    }
+    // First a ragged pass, then a full 160-row pass from independently rolled-back positions.
+    for (0..2) |round| {
+        for (0..n) |i| {
+            windows[i] = tokens[i][0..if (round == 0) widths[i] else mtp.max_rows];
+            try ops.verify(&alone.seqs[i], &alone.drafts[i], windows[i]);
+        }
+        try ops.verifyMany(&qs, &ds, &windows, scores.ptr);
+        for (0..n) |i| {
+            const bytes = windows[i].len * prompt.vocabulary * 2;
+            var a = alone.drafts[i].logits;
+            var b = together.drafts[i].logits;
+            a.len = bytes;
+            b.len = bytes;
+            const x = try check.download(gpu, a);
+            defer gpu.gpa.free(x);
+            const y = try check.download(gpu, b);
+            defer gpu.gpa.free(y);
+            try check.expect(std.mem.eql(u8, x, y), "ragged target logits equal solo, round {d} stream {d}", .{ round, i });
+            try ops.rollback(&alone.seqs[i], &alone.drafts[i], kept[i]);
+            try ops.rollback(&together.seqs[i], &together.drafts[i], kept[i]);
+            try check.expect(alone.seqs[i].fed == together.seqs[i].fed, "independent rollback position", .{});
+        }
+    }
+    check.pass("ragged target windows and independent rollbacks equal solo over five streams, up to 160 rows", .{});
 }

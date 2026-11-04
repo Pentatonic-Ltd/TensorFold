@@ -65,6 +65,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     }
     errdefer own.engine.deinit();
     const e = own.engine;
+    own.verify_capacity = @import("cuda_ragged.zig").capacity(@import("cuda_ragged.zig").wanted(), o.tp != 1, e.chunk, mtp.max_rows, mtp.round_rows);
     if (e.chunk != e.busy_chunk) std.log.info("flashnext: prompt passes of {d} rows, {d} while another stream decodes", .{ e.chunk, e.busy_chunk });
     if (o.vision) |limits| {
         if (own.set != null) return error.VisionCapturedSetUnsupported;
@@ -86,7 +87,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));
     // a shared round's or a shared verify's scores: up to a drafting round's rows (facts' batch_rows)
-    own.logits = try cuda.DeviceBuffer.alloc(driver, @max(round_streams, mtp.round_rows) * prompt.vocabulary * 2);
+    own.logits = try cuda.DeviceBuffer.alloc(driver, @max(round_streams, own.verify_capacity.rows) * prompt.vocabulary * 2);
     errdefer own.logits.free();
     own.lanes = .empty;
     own.next = 0;
