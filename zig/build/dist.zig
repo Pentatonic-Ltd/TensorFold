@@ -47,6 +47,22 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
     const sdk_override = b.option([]const u8, "dist-macos-sdk", "macOS SDK path, default xcrun macosx SDK on a Mac");
     const aot = b.option([]const u8, "dist-cuda-aot", "Optional CUDA capture root with sm<capability>/aot.json and cubins/");
     const host_only = b.option(bool, "dist-host-only", "Verification only: build unusable CUDA archives labelled host-only") orelse false;
+    const platforms_opt = b.option([]const u8, "dist-platforms", "Release targets to build, comma separated: macos-arm64, linux-x86_64, linux-aarch64 (default: all three; a Linux-only build needs no macOS SDK)");
+    // One switch a release target, in `platforms` order: macos-arm64, linux-x86_64, linux-aarch64.
+    var want = [3]bool{ true, true, true };
+    if (platforms_opt) |list| {
+        want = .{ false, false, false };
+        var it = std.mem.splitScalar(u8, list, ',');
+        while (it.next()) |raw| {
+            const name = std.mem.trim(u8, raw, " ");
+            const at: ?usize = if (std.mem.eql(u8, name, "macos-arm64")) 0 else if (std.mem.eql(u8, name, "linux-x86_64")) 1 else if (std.mem.eql(u8, name, "linux-aarch64")) 2 else null;
+            if (at == null) {
+                step.dependOn(&b.addFail(b.fmt("-Ddist-platforms: unknown release target '{s}'; choose from macos-arm64, linux-x86_64, linux-aarch64", .{name})).step);
+                return;
+            }
+            want[at.?] = true;
+        }
+    }
     @import("release_paths_step.zig").steps(b, privacy, ids, options, sdk_override);
     if (version == null) {
         step.dependOn(&b.addFail("dist requires -Dversion=MAJOR.MINOR.PATCH; the release owner chooses the version").step);
@@ -69,13 +85,14 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         return;
     }
     const fatbin_check = if (fatbins) |dir| cuda.checkDistFatbins(b, dir, privacy) else null;
-    const sdk = sdk_override orelse if (b.graph.host.result.os.tag == .macos)
+    const sdk = if (!want[0]) "" else sdk_override orelse if (b.graph.host.result.os.tag == .macos)
         std.mem.trim(u8, b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" }), "\r\n")
     else {
-        step.dependOn(&b.addFail("the macOS archive requires a macOS SDK; use a Mac builder or -Ddist-macos-sdk=DIR").step);
+        step.dependOn(&b.addFail("the macOS archive requires a macOS SDK; use a Mac builder, -Ddist-macos-sdk=DIR, or leave macos-arm64 out of -Ddist-platforms").step);
         return;
     };
-    for (platforms) |p| {
+    for (platforms, 0..) |p, at| {
+        if (!want[at]) continue;
         const target = b.resolveTargetQuery(p.query);
         const exe = server(b, target, ids, options, sdk, fatbins);
         if (p.query.os_tag == .linux) if (fatbin_check) |check| exe.step.dependOn(check);
