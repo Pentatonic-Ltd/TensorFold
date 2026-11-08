@@ -101,7 +101,34 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
         try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
     }
     if (reasoning) |r| try m.put(a, "reasoning", r);
+    try m.put(a, "capabilities", try capabilitiesValue(a, info));
     return .{ .object = m };
+}
+
+/// /v1/models' ``capabilities``: every capability flag the engine publishes, as booleans.
+fn capabilitiesValue(a: Allocator, info: api.Info) Allocator.Error!Value {
+    const c = try json.newObject(a);
+    try c.put(a, "text_generation", .{ .bool = info.text_generation });
+    try c.put(a, "context_fitted", .{ .bool = info.context_fitted });
+    try c.put(a, "call_gates", .{ .bool = info.call_gates });
+    try c.put(a, "loop_guard", .{ .bool = info.loop_guard });
+    try c.put(a, "thinking_budget", .{ .bool = info.thinking_budget });
+    try c.put(a, "answer_limit", .{ .bool = info.answer_limit });
+    try c.put(a, "structures", .{ .bool = info.structures });
+    try c.put(a, "logprobs", .{ .bool = info.logprobs });
+    try c.put(a, "penalties", .{ .bool = info.penalties });
+    try c.put(a, "prompt_logprobs", .{ .bool = info.prompt_logprobs });
+    try c.put(a, "prompt_cache", .{ .bool = info.prompt_cache });
+    try c.put(a, "warm_turns", .{ .bool = info.warm_turns });
+    try c.put(a, "plain_only", .{ .bool = info.plain_only });
+    try c.put(a, "decides", .{ .bool = info.decides });
+    try c.put(a, "pictures", .{ .bool = info.pictures });
+    try c.put(a, "greedy_only", .{ .bool = info.greedy_only });
+    try c.put(a, "slide_conversations", .{ .bool = info.slide_conversations });
+    try c.put(a, "vision", .{ .bool = info.vision != null });
+    try c.put(a, "speech", .{ .bool = info.speech != null });
+    try c.put(a, "embeddings", .{ .bool = info.embeddings != null });
+    return .{ .object = c };
 }
 
 /// /v1/models' ``reasoning``: the thinking default and the template's levels.
