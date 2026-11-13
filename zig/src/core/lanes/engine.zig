@@ -16,6 +16,7 @@ const lone_costs = @import("lone_costs.zig");
 const open = @import("open.zig");
 const handover = @import("handover.zig");
 const trim = @import("trim.zig");
+const mtp = @import("mtp_policy.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
 const LogRow = @import("logprob.zig").Row;
@@ -452,7 +453,10 @@ pub const Engine = struct {
     } else struct {};
 
     fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
-        const requests = try @import("root_copy.zig").prepare(e, original);
+        const prepared = try @import("root_copy.zig").prepare(e, original);
+        // acceptance gate: a stream whose drafts mostly miss decodes autoregressively (absorb only) until a probe round warms it
+        const requests = try e.arena.allocator().dupe(be.DraftRequest, prepared);
+        for (requests) |*r| r.depth = mtp.gatedDepth(r.depth, r.stream.drafted, r.stream.accepted, r.stream.rounds);
         for (requests) |r| try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(r.stream.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = r.follow }), f("rows", if (r.rows) |x| .{ .u32s = x } else .null) });
         // a lone stream's lanes: the head tree or chain + grafts with the most expected tokens a round time
         var lone: ?shape.Shape = null;
