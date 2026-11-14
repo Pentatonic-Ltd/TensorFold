@@ -399,7 +399,8 @@ pub const Engine = struct {
         errdefer if (lone) |l| l.deinit(e.gpa);
         var asked = requests;
         var one: [1]be.DraftRequest = undefined;
-        if (e.cfg.head_trees and e.cfg.head_lanes > 0 and e.alone and requests.len == 1 and requests[0].depth > 0) {
+        // the gate's cold probe is one row: the planner must not widen it to a tree or a deeper chain
+        if (e.cfg.head_trees and e.cfg.head_lanes > 0 and e.alone and requests.len == 1 and requests[0].depth > 0 and !mtp.cold(requests[0].stream.drafted, requests[0].stream.accepted)) {
             const s = requests[0].stream;
             if (s.odds == null) s.odds = shape.Odds.init(shape.start_odds, shape.start_weight);
             const cap: usize = @intCast(@max(1, @min(@min(shape.max_depth, e.cfg.head_depth), s.draftRoom() - 1)));
