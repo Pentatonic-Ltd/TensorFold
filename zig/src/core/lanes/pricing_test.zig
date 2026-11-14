@@ -53,7 +53,11 @@ test "a greedy stream after sampled streams drafts as on a fresh engine, by dept
     for ([_]bool{ false, true }) |node_probabilities| {
         const fresh = try greedyAfter(node_probabilities, 0);
         const after = try greedyAfter(node_probabilities, 2);
+        // the invariant: sampled streams' host draws never change a later greedy stream's rounds or drafts
         try std.testing.expectEqual(fresh, after);
-        try std.testing.expect(fresh[1] > fresh[0]); // it drafted
+        // By depth the head drafts most rounds. By node chances the stream can dip below the acceptance
+        // gate's floor and decode one token a round, so "it drafted more than it decoded" holds only for the
+        // depth rule; both still draft at all.
+        if (node_probabilities) try std.testing.expect(fresh[1] > 0) else try std.testing.expect(fresh[1] > fresh[0]);
     }
 }
