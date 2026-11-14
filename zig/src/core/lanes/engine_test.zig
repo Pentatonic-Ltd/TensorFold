@@ -411,14 +411,115 @@ test "structured output: held head drafts come back as host tokens, so a grammar
         try engine.addStream(&s);
         while (engine.activeCount() > 0) try engine.step();
         try expectInGrammar(s.emitted(), .{ .length = 60, .free = true });
-        // The fake head misses one draft in five (18 of 34 accepted here), so the
-        // stream's cumulative acceptance dips below the acceptance gate's floor
-        // mid-run and the gate stops drafting; the grammar output is still
-        // complete, decoded one token a round while gated.
-        // Open decision: should a grammar stream be EXEMPT from the gate? If so,
-        // exempt it in mtp.gatedDepth and restore the old efficiency assertion.
+        // The fake head misses one draft in five, so the stream's cumulative acceptance may dip
+        // under the acceptance gate's floor mid-run: the grammar stays under the gate, and the
+        // output must stay complete and valid whichever rounds draft.
         try std.testing.expect(s.emitted().len > 0);
     }
+}
+
+const gate = @import("mtp_policy.zig");
+
+const Gated = struct {
+    emitted: []u32,
+    rounds: u64,
+    drafted: u64, // rows drafted after the forced start
+    accepted: u64,
+    recovered_at: ?u64 = null, // the first round after which the stream is no longer cold
+
+    fn deinit(g: Gated) void {
+        gpa.free(g.emitted);
+    }
+};
+
+/// One stream under the test grammar, started with a forced draft history (`drafted0` rows, `accepted0` kept) and
+/// head drafts only (no copies), so held head drafts come back as host tokens whenever the gate lets one through.
+fn runGated(c: Case, drafted0: u64, accepted0: u64) !Gated {
+    var cfg = try model();
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var p = try SuffixLookup.init(gpa, .{ .min_match = 1000 });
+    defer p.deinit();
+    var g: Classes = c.classes orelse .{};
+    var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, g.after);
+    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = c.eos, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .grammar = if (c.classes != null) &k else null });
+    defer s.deinit(gpa);
+    s.drafted = drafted0;
+    s.accepted = accepted0;
+    try engine.addStream(&s);
+    var recovered: ?u64 = null;
+    while (engine.activeCount() > 0) {
+        try engine.step();
+        if (recovered == null and !gate.cold(s.drafted, s.accepted)) recovered = s.rounds;
+    }
+    return .{ .emitted = try gpa.dupe(u32, s.emitted()), .rounds = s.rounds, .drafted = s.drafted - drafted0, .accepted = s.accepted - accepted0, .recovered_at = recovered };
+}
+
+test "gated structured output: a forced-cold grammar stream decodes under the mask and stays valid, greedy and sampled" {
+    const grammars = [_]Classes{ .{ .length = 60, .free = true }, .{ .length = 20 }, .{ .length = 50, .spell = true } };
+    for ([_]?Sampling{ null, .{ .seed = 3, .temperature = 0.9, .top_k = 0, .top_p = 0.9 } }) |sampling| {
+        for (grammars) |classes| {
+            const c: Case = .{ .prompt = &p1, .sampling = sampling, .max_new = 80, .classes = classes };
+            var plain_case = c;
+            plain_case.drafts = false;
+            const plain = try run(&.{plain_case});
+            defer free(plain);
+            const cold = try runGated(c, 100, 10); // cold from the first round
+            defer cold.deinit();
+            try std.testing.expect(gate.cold(100, 10));
+            try std.testing.expectEqualSlices(u32, plain[0], cold.emitted);
+            try expectInGrammar(cold.emitted, classes);
+            // gated: head drafts only on probe rounds, so at most a quarter of rounds draft (ungated: nearly every round).
+            // A grammar that spells its own text keeps its exact drafts: they are no guess for the gate to throttle.
+            if (!classes.spell) try std.testing.expect(cold.drafted > 0 and 4 * cold.drafted <= cold.rounds);
+        }
+    }
+}
+
+test "gated structured output: probe rounds draft a host token under the mask and advance the grammar state" {
+    for ([_]?Sampling{ null, .{ .seed = 3, .temperature = 0.9, .top_k = 0, .top_p = 0.9 } }) |sampling| {
+        const classes: Classes = .{ .length = 60, .free = true };
+        const cold = try runGated(.{ .prompt = &p1, .sampling = sampling, .max_new = 80, .classes = classes }, 100, 0); // never recovers: 0 of 100
+        defer cold.deinit();
+        try expectInGrammar(cold.emitted, classes);
+        // a 60-token reply takes ~50 rounds, so probe rounds fired: some host tokens were drafted, far from every round
+        try std.testing.expect(cold.drafted >= 1 and 4 * cold.drafted <= cold.rounds);
+        // the stream still emits at least a token a round: probes never cost a round
+        try std.testing.expect(cold.emitted.len >= cold.rounds);
+    }
+}
+
+test "gated structured output: a tool-call grammar that starts after the think end stays valid cold" {
+    for ([_]?Sampling{ null, .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 } }) |sampling| {
+        const c: Case = .{ .prompt = &p2, .sampling = sampling, .think_budget = 9, .max_new = 80, .classes = .{ .after = 91, .length = 30, .free = true } };
+        var plain_case = c;
+        plain_case.drafts = false;
+        const plain = try run(&.{plain_case});
+        defer free(plain);
+        const cold = try runGated(c, 100, 10);
+        defer cold.deinit();
+        try std.testing.expectEqualSlices(u32, plain[0], cold.emitted);
+        try expectInGrammar(cold.emitted, c.classes.?);
+    }
+}
+
+test "gated drafting: a cold stream recovers above the floor through its probe rounds, within a bounded number of rounds" {
+    // 16 drafted rows, none kept: cold. Every `gate_probe`th round drafts one row; the fake head lands most of them,
+    // so the cumulative rate climbs back to the floor after about two rows kept per row missed.
+    const c: Case = .{ .prompt = &p1, .max_new = 400, .eos = &.{} };
+    const out = try runGated(c, gate.gate_warmup, 0);
+    defer out.deinit();
+    try std.testing.expect(gate.cold(gate.gate_warmup, 0));
+    const at = out.recovered_at orelse return error.NeverRecovered;
+    // recovering needs accepted >= (16 + n) / 2 over n probe rows, so n >= 16: at least 16 probes, a round in 8 each
+    try std.testing.expect(at >= 16 * gate.gate_probe);
+    try std.testing.expect(at <= 28 * gate.gate_probe); // bound: at most 28 probe rounds
+    // once warm it drafts every round again, so it finishes in fewer rounds than a token each
+    try std.testing.expect(out.emitted.len > out.rounds);
 }
 
 test "structured output: where the grammar spells its own text, its drafts fill the window and drafted == plain" {
