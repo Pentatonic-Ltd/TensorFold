@@ -8,6 +8,7 @@ const SuffixLookup = @import("proposer.zig").SuffixLookup;
 const Sampling = @import("sampling.zig").Sampling;
 const grammar = @import("grammar.zig");
 const win = @import("windows.zig");
+const be = @import("backend.zig");
 
 const gpa = std.testing.allocator;
 
@@ -520,6 +521,52 @@ test "gated drafting: a cold stream recovers above the floor through its probe r
     try std.testing.expect(at <= 28 * gate.gate_probe); // bound: at most 28 probe rounds
     // once warm it drafts every round again, so it finishes in fewer rounds than a token each
     try std.testing.expect(out.emitted.len > out.rounds);
+}
+
+/// A draft vtable that records each request's depth and whether it asked for a tree, instead of drafting.
+var probe_depths: std.ArrayList(u32) = .empty;
+var probe_trees: usize = 0;
+
+fn probeDraft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+    _ = ptr;
+    for (requests) |r| {
+        try probe_depths.append(gpa, r.depth);
+        if (r.lanes != null) probe_trees += 1;
+    }
+}
+
+test "the gate's cold probe stays one row when the head-tree planner is enabled" {
+    var lane_costs: [16]@import("config.zig").Cost = undefined;
+    for (&lane_costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
+    var cfg = try Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &lane_costs, .lane_costs = &lane_costs, .head_trees = true, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+    defer cfg.deinit(gpa);
+    cfg.head_lanes = 8;
+    cfg.head_depth = 16;
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var backend = target.backend();
+    var vt = backend.vtable.*;
+    vt.draft = probeDraft;
+    backend.vtable = &vt;
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, backend, clock.clock());
+    defer engine.deinit();
+    engine.alone = true;
+    var p = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer p.deinit();
+    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &p1, .max_new = 40, .eos = &.{96}, .drafts = true, .proposer = p.proposer() });
+    defer s.deinit(gpa);
+    s.drafted = 100;
+    s.accepted = 20;
+    s.rounds = 8; // a probe round: the gate allows one row while cold
+    try std.testing.expect(gate.cold(s.drafted, s.accepted));
+    probe_depths.clearRetainingCapacity();
+    probe_trees = 0;
+    defer probe_depths.deinit(gpa);
+    try Engine.testing.askDrafts(&engine, &.{.{ .stream = &s, .depth = 4, .position = 1, .follow = &.{}, .rows = null, .start = 0 }});
+    try std.testing.expectEqual(@as(usize, 1), probe_depths.items.len);
+    try std.testing.expectEqual(@as(u32, 1), probe_depths.items[0]); // the one-row probe, not the planner's depth
+    try std.testing.expectEqual(@as(usize, 0), probe_trees); // and no tree
 }
 
 test "structured output: where the grammar spells its own text, its drafts fill the window and drafted == plain" {
