@@ -200,18 +200,17 @@ test "a hostile record of near-miss continuations changes no token, and its band
     defer with.deinit();
     try std.testing.expectEqualSlices(u32, reply, with.emitted[0]);
     try std.testing.expectEqual(@as(u64, 0), with.accepted);
-    // The acceptance gate now decodes a cold stream one token a round, so the
-    // recall gets more rounds to propose against the hostile record (19 vs the
-    // old ~6) — but every proposal is still rejected (accepted == 0 above) and
-    // the reply is unchanged. Open decision: is that extra recall traffic
-    // acceptable, or should a cold stream also silence Recall? Flag for the
-    // engine owner alongside the grammar-exemption question.
-    try std.testing.expect(with.rounds <= before.rounds + 12);
+    // Recall's back-off is its own and stays separate from the MTP acceptance gate. The gate
+    // decodes this cold stream one token a round, so Recall is asked on more rounds than it
+    // was before the gate (19 proposals over 10 extra rounds, against about 6): bound both,
+    // and keep every proposal rejected, the reply unchanged and the band backed off.
+    try std.testing.expect(with.proposals <= 20 and with.rounds <= before.rounds + 10);
     try std.testing.expect(shared.rates.rate(recall.bands.len - 1) < 0.7); // its matches are all 64 ids long
     const again = try run(&.{.{ .prompt = &p }}, &shared, alone); // a later request meets the backed-off band
     defer again.deinit();
     try std.testing.expectEqualSlices(u32, reply, again.emitted[0]);
-    try std.testing.expect(again.proposals < with.proposals and again.rounds <= before.rounds + 12);
+    try std.testing.expectEqual(@as(u64, 0), again.accepted);
+    try std.testing.expect(again.proposals < with.proposals and again.proposals <= 16 and again.rounds <= before.rounds + 4);
 }
 
 test "Recall's continuations graft beside the head's chain and keep the reply's tokens" {
