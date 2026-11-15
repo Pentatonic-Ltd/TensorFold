@@ -16,6 +16,7 @@ const lone_costs = @import("lone_costs.zig");
 const open = @import("open.zig");
 const handover = @import("handover.zig");
 const trim = @import("trim.zig");
+const mtp = @import("mtp_policy.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
 const LogRow = @import("logprob.zig").Row;
@@ -451,14 +452,18 @@ pub const Engine = struct {
     } else struct {};
 
     fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
-        const requests = try @import("root_copy.zig").prepare(e, original);
+        const prepared = try @import("root_copy.zig").prepare(e, original);
+        // acceptance gate: a stream whose drafts mostly miss decodes autoregressively (absorb only) until a probe round warms it
+        const requests = try e.arena.allocator().dupe(be.DraftRequest, prepared);
+        for (requests) |*r| r.depth = mtp.gatedDepth(r.depth, r.stream.drafted, r.stream.accepted, r.stream.rounds);
         for (requests) |r| try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(r.stream.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = r.follow }), f("rows", if (r.rows) |x| .{ .u32s = x } else .null) });
         // a lone stream's lanes: the head tree or chain + grafts with the most expected tokens a round time
         var lone: ?shape.Shape = null;
         errdefer if (lone) |l| l.deinit(e.gpa);
         var asked = requests;
         var one: [1]be.DraftRequest = undefined;
-        if (e.cfg.head_trees and e.cfg.head_lanes > 0 and e.alone and requests.len == 1 and requests[0].depth > 0) {
+        // the gate's cold probe is one row: the planner must not widen it to a tree or a deeper chain
+        if (e.cfg.head_trees and e.cfg.head_lanes > 0 and e.alone and requests.len == 1 and requests[0].depth > 0 and !mtp.cold(requests[0].stream.drafted, requests[0].stream.accepted)) {
             const s = requests[0].stream;
             if (s.odds == null) s.odds = shape.Odds.init(shape.start_odds, shape.start_weight);
             const cap: usize = @intCast(@max(1, @min(@min(shape.max_depth, e.cfg.head_depth), s.draftRoom() - 1)));
